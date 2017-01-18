@@ -26,4 +26,4 @@ Alternatively, you can run this program locally using PHP's built-in web server:
 
 ## Contributing
 
-This project uses Semantic Versioning.
+This project uses Semantic Versioning. See database implementation details in [DATABASE_SCHEMA.txt].
