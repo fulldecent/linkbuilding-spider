@@ -1,5 +1,4 @@
 <?php
-$timeout = microtime(true) + 5.0;
 // https://phpdelusions.net/pdo
 $database = new \PDO('sqlite:spider.db');
 $database->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
@@ -7,7 +6,16 @@ $statement = $database->prepare("SELECT * FROM jobs WHERE uuid = ?");
 $statement->execute([$_GET['jobid']]);
 $job = json_decode($statement->fetch(PDO::FETCH_OBJ)->data);
 
-foreach ($job->targets as $lastFetchedTarget => $target) {
+// Build the multi-curl handle, adding both
+$multiHandle = curl_multi_init();
+
+// Add each link to queue
+$remainingTargets = $job->targets;
+//shuffle($remainingTargets); // use a deterministic ordering
+usort($remainingTargets, function ($a, $b) { return strcmp(md5($a), md5($b)); }); // a determinist shuffling
+$targets = [];
+while (count($targets) < 30 && count($remainingTargets) > 0) {
+  $target = array_shift($remainingTargets);
   $statement = $database->prepare("SELECT * FROM spideredPages WHERE url = ?");
   $statement->execute([$target]);
   $page = $statement->fetch();
@@ -18,18 +26,33 @@ foreach ($job->targets as $lastFetchedTarget => $target) {
 	curl_setopt($curl, CURLOPT_USERAGENT, 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/49.0.2623.87 Safari/537.36');
 	curl_setopt($curl, CURLOPT_FAILONERROR, true);
 	curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
-	curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, 6); 
-	curl_setopt($curl, CURLOPT_TIMEOUT, 7); //timeout in seconds
-	$html = curl_exec($curl);
-	curl_close($curl);
+	curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, 4);
+	curl_setopt($curl, CURLOPT_TIMEOUT, 5); //timeout in seconds
+  curl_multi_add_handle($multiHandle, $curl);
+  $targets[$target] = $curl;
+}
+
+// Execute
+$running = null;
+do {
+  curl_multi_exec($multiHandle, $running);
+} while ($running);
+
+//var_dump("memory", memory_get_usage());
+
+// Harvest results
+foreach ($targets as $target => $curl) {
+  $html = curl_multi_getcontent($curl);
+  curl_multi_remove_handle($multiHandle, $curl);
 	preg_match_all('/https?\:\/\/[^\"\' ]+/i', $html, $matches);
 	$all_urls = $matches[0];
   $statement = $database->prepare("REPLACE INTO spideredPages (url, date, data) VALUES (?, date('now'), ?)");
   $statement->execute([$target, json_encode($all_urls)]);
-  if (microtime(true) > $timeout) {
-  	header("refresh:3;?jobid={$_GET['jobid']}");
-  	break;
-  }
+}
+curl_multi_close($multiHandle);
+
+if (count($remainingTargets) > 0) {
+  	header("refresh:2;?jobid={$_GET['jobid']}");
 }
 ?>
 <!DOCTYPE html>
@@ -47,11 +70,11 @@ foreach ($job->targets as $lastFetchedTarget => $target) {
     <!-- Main jumbotron for a primary marketing message or call to action -->
     <div class="jumbotron">
       <div class="container">
-        <h1 class="display-3">Linkbuilding Spider</h1>
-        <p>Running report, <?= $lastFetchedTarget + 1 ?> of <?= count($job->targets) ?> pages retrieved...</p>
+        <h1 class="display-3">Linkbuilding Spider &#x1F577;</h1>
+        <p>Running report, <?= count($job->targets) - count($remainingTargets) ?> of <?= count($job->targets) ?> pages retrieved...</p>
         
         <div class="progress">
-          <div class="progress-bar progress-bar-striped progress-bar-animated" style="width: <?= 100 * ($lastFetchedTarget + 1) / count($job->targets) ?>%"></div>
+          <div class="progress-bar progress-bar-striped progress-bar-animated" style="width: <?= 100 * (count($job->targets) - count($remainingTargets)) / count($job->targets) ?>%"></div>
         </div>
       </div>
     </div>
@@ -59,7 +82,7 @@ foreach ($job->targets as $lastFetchedTarget => $target) {
     <div class="container">
     
 <?php
-if ($lastFetchedTarget + 1 < count($job->targets))	{
+if (count($remainingTargets) > 0)	{
 	exit;
 }
 
@@ -77,7 +100,7 @@ foreach ($job->targets as $target) {
 		}
 	}
 	if (count($matchedLinks) > 0) {
-		echo "<p class=\"lead\">Checking ".htmlspecialchars($data->targets[$currentPage])."</p>\n";
+		echo "<p class=\"lead\">Checking ".htmlspecialchars($target)."</p>\n";
 		echo "<ul>\n";
 		foreach ($matchedLinks as $link => $category) {
 			if ($category == 'mine') {
