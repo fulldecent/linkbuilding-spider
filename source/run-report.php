@@ -1,6 +1,9 @@
 <?php
+define('DB_FILE', 'spider.db');
+define('MAX_CONNECTIONS', 200);
+
 // https://phpdelusions.net/pdo
-$database = new \PDO('sqlite:spider.db');
+$database = new \PDO('sqlite:' . DB_FILE);
 $database->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 $statement = $database->prepare("SELECT * FROM jobs WHERE uuid = ?");
 $statement->execute([$_GET['jobid']]);
@@ -8,15 +11,15 @@ $job = json_decode($statement->fetch(PDO::FETCH_OBJ)->data);
 $remainingTargets = $job->targets;
 usort($remainingTargets, function ($a, $b) { return strcmp(md5($a), md5($b)); }); // a determinist shuffling
 
-// Queue up to 30 target URLs we haven't already processed before
+// Queue target URLs we haven't already processed
 $multiHandle = curl_multi_init();
 $targets = [];
-while (count($targets) < 30 && count($remainingTargets) > 0) {
+while (count($targets) < MAX_CONNECTIONS && count($remainingTargets) > 0) {
   $target = array_shift($remainingTargets);
-  $statement = $database->prepare('SELECT * FROM spideredPages WHERE url = ?');
+  $statement = $database->prepare('SELECT 1 FROM spideredPages WHERE url = ?');
   $statement->execute([$target]);
-  $page = $statement->fetch();
-  if ($page !== false) {
+  $alreadyProcessed = $statement->fetch();
+  if ($alreadyProcessed !== false) {
     continue;
   }
 	$curl = curl_init($target);
@@ -32,24 +35,28 @@ while (count($targets) < 30 && count($remainingTargets) > 0) {
 // Run loop for downloading
 $running = null;
 do {
-  curl_multi_exec($multiHandle, $running);
-} while ($running);
-
-//var_dump("memory (MiB)", number_format(memory_get_usage()/1024/1024, 2), $_SERVER['REMOTE_PORT']);
-
-// Harvest results
-foreach ($targets as $target => $curl) {
-  $html = curl_multi_getcontent($curl);
-  curl_multi_remove_handle($multiHandle, $curl);
-	preg_match_all('/https?\:\/\/[^\"\' <]+/i', $html, $matches);
-	$all_urls = array_unique($matches[0]);
-  $statement = $database->prepare("REPLACE INTO spideredPages (url, date, data) VALUES (?, date('now'), ?)");
-  $statement->execute([$target, json_encode($all_urls)]);
-}
+  $status = curl_multi_exec($multiHandle, $running);
+  // Find and process any completed requests
+  while ($info = curl_multi_info_read($multiHandle)) {
+    $target = array_search($info['handle'], $targets);
+    $html = curl_multi_getcontent($info['handle']);
+    curl_multi_remove_handle($multiHandle, $info['handle']);
+    preg_match_all('/https?\:\/\/[^\"\' <]+/i', $html, $matches);
+    $all_urls = array_unique($matches[0]);
+    $statement = $database->prepare("REPLACE INTO spideredPages (url, date, data) VALUES (?, date('now'), ?)");
+    $statement->execute([$target, json_encode($all_urls)]);
+    unset($targets[$target]);
+    curl_multi_remove_handle($multiHandle, $info['handle']);
+  }
+  // Use select to wait 0.25 sec
+  if ($running > 0) {
+    curl_multi_select($multiHandle, 0.1);
+  }
+} while ($running > 0);
 curl_multi_close($multiHandle);
 
 if (count($remainingTargets) > 0) {
-  	header("refresh:2;?jobid={$_GET['jobid']}");
+  	header("refresh:1;?jobid={$_GET['jobid']}");
 }
 ?>
 <!DOCTYPE html>
@@ -77,6 +84,10 @@ if (count($remainingTargets) > 0) {
     <div class="container">
 
 <?php
+
+// Show memory stats
+echo '<p class="lead">Memory usage: '.number_format(memory_get_peak_usage()/1024/1024, 2).' MiB of '.ini_get('memory_limit').'</p>';
+
 if (count($remainingTargets) > 0)	{
 	exit;
 }
