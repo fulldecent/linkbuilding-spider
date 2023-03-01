@@ -17,16 +17,7 @@ foreach (explode("\n", $_POST['targets']) as $target) {
 
 foreach (explode("\n", $_POST['yoursites']) as $target) {
   $target = trim($target);
-  if (strlen($target)) {
-    $data['searchTerms'][$target] = 'mine';
-  }
-}
-
-foreach (explode("\n", $_POST['competitorsites']) as $target) {
-  $target = trim($target);
-  if (strlen($target)) {
-    $data['searchTerms'][$target] = 'competitor';
-  }
+  $data['searchTerms'][] = $target;
 }
 
 $hash = sha1(json_encode($data));

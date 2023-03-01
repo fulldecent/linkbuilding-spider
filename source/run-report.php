@@ -143,9 +143,9 @@ $database->beginTransaction();
 
 curl_fetch_multi_3($targets, function ($url, $body, $info) use ($database) {
 	preg_match_all('/https?\:\/\/[^\"\' <]+/i', $body, $matches);
-	$allUrls = array_unique($matches[0]);
+	$allUrls = array_values(array_unique($matches[0]));
   $statement = $database->prepare("REPLACE INTO spideredPages (url, date, data) VALUES (?, date('now'), ?)");
-  $statement->execute([$url, json_encode($allUrls)]);
+  $statement->execute([$url, json_encode($allUrls, JSON_INVALID_UTF8_IGNORE)]);
 }, MAX_CONNECTIONS, $curlOpts);
 
 // Commit changes
@@ -186,52 +186,55 @@ $eta = $remainingCount / $pagesPerSecond;
       <div class="container">
         <h1 class="display-3">Linkbuilding Spider &#x1F577;</h1>
         <p class="lead">Remaining to fetch: <?= number_format($remainingCount) ?></p>
-        <p>Speed: <?= number_format(BITE_SIZE / $processingTime, 1) ?> pages per second</p>
-        <p>ETA: <?= number_format($eta, 1) ?> seconds</p>
-      </div>
-    </header>
-
-    <div class="container">
 <?php
 if ($remainingCount > 0) {
-  echo '</div></body></html>';
+  echo '<p>Speed ' . number_format($pagesPerSecond, 1) . ' pages per second</p>';
+  echo '<p>ETA ' . number_format($eta, 1) . ' seconds</p>';
+  echo '</div></header></body></html>';
   exit;
 }
-
-echo '<h2>Results</h2>';
-$count = 0;
-
-foreach ($job->targets as $target) {
-  $statement = $database->prepare('SELECT data FROM spideredPages WHERE url = ?');
-  $statement->execute([$target]);
-  $foundLinks = json_decode($statement->fetchColumn());
-//  if (empty($foundLinks)) $foundLinks = [];
-	$matchedLinks = [];
-	foreach ($foundLinks as $foundLink) {
-		foreach ($job->searchTerms as $searchTerm => $category) {
-			if (false !== stripos($foundLink, $searchTerm)) {
-        if ($category !== 'mine') continue; // clean it up
-				$matchedLinks[$foundLink] = $category;
-			}
-		}
-	}
-  $count += count($matchedLinks);
-	if (count($matchedLinks) > 0) {
-		echo '<p class="lead">Target: '.htmlspecialchars($target).'</p>' . PHP_EOL;
-		echo '<ul>' . PHP_EOL;
-		foreach ($matchedLinks as $link => $category) {
-			if ($category == 'mine') {
-				echo '<li><span class="badge bg-success">Your site</span> '.htmlspecialchars($link).'</li>' . PHP_EOL;
-			} else {
-				echo '<li><span class="badge bg-danger">Competitor site</span> '.htmlspecialchars($link).'</li>' . PHP_EOL;
-			}
-		}
-		echo '</ul>' . PHP_EOL;
-	}
-	flush();
-}
 ?>
-      <p class="lead">Total: <?= number_format($count) ?></p>
+      </div>
+    </header>
+    <div class="container">
+      <h2>Results</h2>
+<?php
+$sql = <<<SQL
+    -- Why is this so easy?
+SELECT targets.atom targetUrl
+     , foundLinks.atom yourSite
+--     , searchTerms.value
+  FROM jobs
+  JOIN json_each(jobs.data, "$.targets") targets
+  JOIN spideredPages ON spideredPages.url = targets.atom
+  JOIN json_each(jobs.data, "$.searchTerms") searchTerms
+  JOIN json_each(spideredPages.data) foundLinks
+    ON foundLinks.atom LIKE '%' || searchTerms.value || '%'
+ WHERE jobs.uuid = ?
+ ORDER BY targets.atom, foundLinks.atom
+SQL;
+$statement = $database->prepare($sql);
+$statement->execute([$_GET['jobid']]);
+$results = $statement->fetchAll(PDO::FETCH_OBJ);
+
+$lastTarget = null;
+foreach ($results as $result) {
+  if ($result->targetUrl !== $lastTarget) {
+    if ($lastTarget !== null) {
+      echo '</ul>';
+    }
+    echo '<p class="lead">Target: '.htmlspecialchars($result->targetUrl).'</p>' . PHP_EOL;
+    echo '<ul>' . PHP_EOL;
+    $lastTarget = $result->targetUrl;
+  }
+  echo '<li>'.htmlspecialchars($result->yourSite).'</li>' . PHP_EOL;
+}
+if ($lastTarget !== null) {
+  echo '</ul>';
+}
+
+?>
+      <p class="lead">Found <?= number_format(count($results)) ?> links</p>
     </div>
   </body>
 </html>
